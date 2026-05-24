@@ -1,0 +1,133 @@
+@startuml Local k3s Deployment
+!theme plain
+title Deploying My Service on a Local k3s Cluster
+
+skinparam componentStyle rectangle
+skinparam backgroundColor #FAFAFA
+
+actor "Me\n(Developer)" as me
+actor "External\nUsers" as users
+
+node "My Computer (acts as Server)" as host #LightCyan {
+
+  package "Local Tooling" as tooling #White {
+    component "kubectl\n(CLI)" as kubectl
+    component "Dockerfile +\nSource Code" as src
+    component "Docker / nerdctl\n(builds images)" as docker
+    component "Image import:\nk3s ctr images import\nOR local registry :5000" as registry
+  }
+
+  package "k3s CLUSTER (1 node total)" as k3s #LightBlue {
+
+    node "NODE: my-computer\nroles: control-plane, master, worker\n(single k3s binary process)" as n1 #LightSkyBlue {
+
+      package "Server role\n(control plane components)" as cp #LightYellow {
+        component "kube-apiserver" as api
+        database "SQLite\n(default datastore)" as db
+        component "scheduler" as sched
+        component "controller-manager" as ctrl
+      }
+
+      package "Agent role\n(worker components)" as worker #LightGreen {
+        component "kubelet" as kubelet
+        component "kube-proxy" as proxy
+        component "containerd\n(embedded)" as cri
+        component "Flannel CNI\n(built-in)" as cni
+      }
+
+      package "Built-in Add-ons\n(cluster-wide)" as addons #Lavender {
+        component "Traefik\n(Ingress controller)" as traefik
+        component "Klipper / ServiceLB\n(LoadBalancer)" as klipper
+        component "CoreDNS" as dns
+        component "local-path-provisioner\n(default StorageClass)" as storage
+      }
+
+      package "Namespace: my-app\n(workloads scheduled on this node)" as ns #White {
+        component "Deployment:\nmy-service" as deploy
+        component "Pod\n(my-service:v1)" as pod1
+        component "Pod\n(my-service:v1)" as pod2
+        component "Service\n(ClusterIP)" as svc
+        component "Ingress\n(host or path rule)" as ing
+      }
+    }
+  }
+}
+
+' --- Developer workflow ---
+me -[#blue]-> src         : 1. write code
+me -[#blue]-> docker      : 2. docker build -t my-service:v1
+docker -[#blue]-> registry: 3. import / push image
+
+me -[#blue]-> kubectl     : 4. kubectl apply -f manifests/
+kubectl -[#blue]-> api    : sends Deployment +\nService + Ingress YAML
+
+' --- k3s reconciliation ---
+api <--> db : persist state
+api --> sched
+api --> ctrl
+sched ..> kubelet : place pods
+kubelet --> cri : pull + run
+cri --> registry : pull my-service:v1
+cri --> pod1
+cri --> pod2
+
+deploy ..> pod1 : manages
+deploy ..> pod2 : manages
+svc -[#green]-> pod1 : load balance
+svc -[#green]-> pod2 : load balance
+
+' --- Ingress / external access ---
+ing -[#green]-> svc
+traefik -[#orange]-> ing : watches Ingress\nobjects
+klipper -[#orange]-> traefik : exposes :80/:443\non host
+
+users -[#red]-> klipper : http://<your-ip>/\nor http://localhost/
+
+note right of db
+  k3s replaces etcd with
+  SQLite by default --
+  perfect for single-node.
+  Swap to etcd/Postgres for HA.
+end note
+
+note bottom of cri
+  containerd is built INTO
+  the k3s binary -- you do
+  NOT need Docker at runtime
+  (only for building images).
+end note
+
+note left of addons
+  These come pre-installed
+  with k3s. No extra setup
+  needed for Ingress, LB,
+  DNS, or default storage.
+end note
+
+note top of k3s
+  CLUSTER = the whole k3s installation.
+  NODE   = each machine in the cluster.
+  Here: 1 cluster, 1 node (your PC).
+  Add another machine with `k3s agent`
+  -> same cluster, now 2 nodes.
+end note
+
+note bottom of host
+  ** LIMITATION of native k3s **
+  1 OS install = 1 cluster = 1 node.
+  You CANNOT run multiple clusters
+  from this single k3s installation
+  (ports, data dir, and service all
+  collide).
+
+  To run MULTIPLE CLUSTERS on this
+  same computer, use **k3d** instead:
+     k3d cluster create dev
+     k3d cluster create staging
+     k3d cluster create test
+  Each k3d cluster lives in its own
+  set of Docker containers and is
+  fully isolated from the others.
+end note
+
+@enduml

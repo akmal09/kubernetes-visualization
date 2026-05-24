@@ -1,0 +1,121 @@
+@startuml k3d 3-Node Cluster on My Computer
+!theme plain
+title 3-Node k3s Cluster via k3d on a Single Machine
+
+skinparam componentStyle rectangle
+skinparam backgroundColor #FAFAFA
+
+actor "Me\n(Developer)" as me
+actor "Load Generator\n(k6 / hey / wrk)" as load
+
+node "My Computer (Windows + Docker Desktop)" as host #LightCyan {
+
+  package "Local Tooling" as tooling #White {
+    component "kubectl" as kubectl
+    component "k3d CLI" as k3dcli
+    component "docker CLI" as docker
+  }
+
+  package "Docker Engine" as docker_engine #MistyRose {
+
+    package "k3d CLUSTER: mycluster" as cluster #LightBlue {
+
+      node "k3d-mycluster-serverlb\n(NGINX container)\nports: 80, 443, 6443" as lb #Wheat
+
+      node "NODE 1 (server)\nk3d-mycluster-server-0\nroles: control-plane,master" as n1 #LightYellow {
+        component "kube-apiserver" as api
+        database "SQLite" as db
+        component "scheduler" as sched
+        component "controller-manager" as ctrl
+        component "kubelet + containerd" as kc1
+        package "Pods on node 1" as p1 #White {
+          component "Traefik\n(Ingress)" as traefik
+          component "CoreDNS" as dns
+          component "my-service\nreplica 1" as r1
+        }
+      }
+
+      node "NODE 2 (agent)\nk3d-mycluster-agent-0\nrole: worker" as n2 #LightGreen {
+        component "kubelet + containerd" as kc2
+        package "Pods on node 2" as p2 #White {
+          component "my-service\nreplica 2" as r2
+          component "my-service\nreplica 3" as r3
+        }
+      }
+
+      node "NODE 3 (agent)\nk3d-mycluster-agent-1\nrole: worker" as n3 #LightGreen {
+        component "kubelet + containerd" as kc3
+        package "Pods on node 3" as p3 #White {
+          component "my-service\nreplica 4" as r4
+          component "my-service\nreplica 5" as r5
+        }
+      }
+    }
+  }
+}
+
+' --- Developer flow ---
+me -[#blue]-> k3dcli  : 1. k3d cluster create mycluster\n   --servers 1 --agents 2
+k3dcli -[#blue]-> docker_engine : spins up node containers
+me -[#blue]-> kubectl : 2. kubectl apply -f deployment.yaml\n   (replicas: 5)
+kubectl -[#blue]-> lb : kubeconfig points to\nhttps://localhost:6443
+lb -[#blue]-> api
+
+' --- Control-plane reconciliation ---
+api <--> db
+api --> sched
+api --> ctrl
+sched ..> kc1 : "place replica 1"
+sched ..> kc2 : "place replicas 2,3"
+sched ..> kc3 : "place replicas 4,5"
+
+' --- Traffic flow ---
+load -[#red]-> lb : http://localhost:80\n(stress test)
+lb -[#red]-> traefik
+traefik -[#green]-> r1 : Service load-balances
+traefik -[#green]-> r2 : across all pods
+traefik -[#green]-> r3 : on all nodes
+traefik -[#green]-> r4
+traefik -[#green]-> r5
+
+' --- HA / scaling experiments ---
+note right of n2
+  HA TEST:
+  k3d node stop k3d-mycluster-agent-0
+  -> pods r2, r3 are rescheduled
+     onto n1 and n3 automatically.
+end note
+
+note right of n3
+  SCALE TEST:
+  kubectl scale deploy my-service \\
+    --replicas=20
+  -> 20 pods distributed
+     across all 3 nodes.
+end note
+
+note bottom of lb
+  k3d creates an NGINX
+  "serverlb" container that
+  forwards host ports to
+  the cluster. This is how
+  localhost:80 reaches
+  Traefik inside the cluster.
+end note
+
+note left of cluster
+  All "nodes" are Docker
+  containers on YOUR machine.
+  They share the same CPU,
+  RAM, disk, and network --
+  great for K8s mechanics,
+  not for real perf numbers.
+end note
+
+note top of host
+  Add `--servers 3` instead of 1
+  for HA control-plane testing
+  (survives 1 server failure).
+end note
+
+@enduml

@@ -1,0 +1,72 @@
+@startuml Kubernetes Architecture
+!theme plain
+title Kubernetes Cluster Architecture
+
+skinparam componentStyle rectangle
+skinparam backgroundColor #FAFAFA
+
+cloud "Users / Clients" as users
+
+package "Control Plane (Master Node)" #LightBlue {
+  component "kube-apiserver" as api
+  component "etcd\n(key-value store)" as etcd
+  component "kube-scheduler" as scheduler
+  component "kube-controller-manager" as ctrl
+  component "cloud-controller-manager" as cloud
+}
+
+package "Worker Node 1" #LightYellow {
+  component "kubelet" as kubelet1
+  component "kube-proxy" as proxy1
+  component "Container Runtime\n(containerd / CRI-O)" as cri1
+
+  package "Pods" as pods1 {
+    component "Pod A\n[container]" as podA
+    component "Pod B\n[container(s)]" as podB
+  }
+}
+
+package "Worker Node 2" #LightYellow {
+  component "kubelet" as kubelet2
+  component "kube-proxy" as proxy2
+  component "Container Runtime" as cri2
+
+  package "Pods " as pods2 {
+    component "Pod C" as podC
+  }
+}
+
+users --> api : kubectl / REST (HTTPS)
+
+api <--> etcd : state read/write
+api --> scheduler : pending pods
+api --> ctrl : desired vs actual state
+api --> cloud : cloud provider API
+
+scheduler ..> api : bind pod -> node
+ctrl ..> api : reconcile loops\n(Deployment, ReplicaSet,\nNode, Job, etc.)
+
+api <--> kubelet1 : pod spec / status
+api <--> kubelet2 : pod spec / status
+
+kubelet1 --> cri1 : run containers
+kubelet2 --> cri2 : run containers
+cri1 --> pods1
+cri2 --> pods2
+
+proxy1 -[#green]-> pods1 : network rules\n(iptables / IPVS)
+proxy2 -[#green]-> pods2 : network rules
+
+note right of etcd
+  Single source of truth.
+  Stores all cluster state.
+end note
+
+note bottom of pods1
+  A Pod is the smallest
+  deployable unit -- one or
+  more containers sharing
+  network + storage.
+end note
+
+@enduml
