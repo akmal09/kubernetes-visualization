@@ -1,0 +1,105 @@
+@startuml Public Access via Cloudflare Tunnel
+!theme plain
+title Exposing Local k3s Service Publicly (Cloudflare Tunnel)
+
+skinparam componentStyle rectangle
+skinparam backgroundColor #FAFAFA
+
+actor "External User\n(any network)" as user
+
+cloud "Cloudflare Edge\n(global anycast network)" as cf #Orange {
+  component "Cloudflare DNS\n(your-domain.com → Cloudflare)" as cfdns
+  component "Cloudflare Proxy\n(handles TLS, DDoS, firewall)" as cfproxy
+  component "Tunnel Connector\n(receives cloudflared connection)" as cfconnector
+}
+
+node "Windows Host" as windows #LightCyan {
+
+  node "WSL2 Ubuntu" as wsl #LightBlue {
+
+    package "Cloudflare Agent" as cfagent #LightYellow {
+      component "cloudflared daemon\n(outbound connection only)\nno open ports needed" as cloudflared
+    }
+
+    node "k3s CLUSTER (1 node)" as k3s #LightSkyBlue {
+
+      package "Built-in Add-ons" as addons #Lavender {
+        component "Klipper / ServiceLB\n(:80 on localhost)" as klipper
+        component "Traefik\n(Ingress controller)" as traefik
+      }
+
+      package "Namespace: my-app" as ns #White {
+        component "Ingress\n(path rule /)" as ing
+        component "Service\n(ClusterIP)" as svc
+        component "Pod\n(my-service:v1)" as pod1
+        component "Pod\n(my-service:v1)" as pod2
+      }
+    }
+  }
+}
+
+' --- Tunnel setup (outbound) ---
+cloudflared -[#blue]-> cfconnector : outbound tunnel\n(QUIC / HTTP2)\ncloudflared initiates this
+
+' --- External traffic flow ---
+user -[#red]-> cfdns             : https://your-domain.com
+cfdns -[#red]-> cfproxy          : DNS resolves to Cloudflare IP
+cfproxy -[#red]-> cfconnector    : proxied through Cloudflare edge
+cfconnector -[#red]-> cloudflared : routed through tunnel
+cloudflared -[#red]-> klipper    : http://localhost:80
+
+' --- Internal k3s flow ---
+klipper -[#orange]-> traefik
+traefik -[#orange]-> ing
+ing -[#orange]-> svc
+svc -[#green]-> pod1             : load balance
+svc -[#green]-> pod2             : load balance
+
+note right of cfconnector
+  Cloudflare manages the
+  public endpoint. No router
+  or firewall config needed.
+  Works behind NAT.
+end note
+
+note right of cloudflared
+  Install inside WSL2:
+  curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+  chmod +x cloudflared
+  mv cloudflared /usr/local/bin/
+
+  Quick tunnel (no domain needed):
+  cloudflared tunnel --url http://localhost:80
+
+  Named tunnel (custom domain):
+  cloudflared tunnel login
+  cloudflared tunnel create my-tunnel
+  cloudflared tunnel route dns my-tunnel your-domain.com
+  cloudflared tunnel run my-tunnel
+end note
+
+note top of cf
+  Cloudflare handles:
+  - Free TLS/HTTPS automatically
+  - DDoS protection
+  - Stable public URL
+  - No dynamic IP problem
+  - No open ports on router/firewall
+end note
+
+note bottom of windows
+  ** ADVANTAGES over Port Forwarding **
+  - No router config needed
+  - No firewall rules needed
+  - WSL2 IP changes don't matter
+  - Free HTTPS out of the box
+  - Stable URL even if public IP changes
+
+  ** REQUIREMENTS **
+  - Cloudflare account (free)
+  - A domain added to Cloudflare
+    (OR use trycloudflare.com for
+     zero-config quick tunnels)
+end note
+
+@enduml

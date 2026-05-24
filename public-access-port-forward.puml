@@ -1,0 +1,108 @@
+@startuml Public Access via Port Forwarding
+!theme plain
+title Exposing Local k3s Service Publicly (Router Port Forwarding)
+
+skinparam componentStyle rectangle
+skinparam backgroundColor #FAFAFA
+
+actor "External User\n(different network)" as user
+cloud "Internet" as internet
+
+node "Home Router" as router #LightSalmon {
+  component "NAT / Port Forward\npublicIP:80 → WindowsIP:80\npublicIP:443 → WindowsIP:443" as nat
+  component "Public IP\n(e.g. 114.x.x.x)\n[may change on reboot]" as pubip
+}
+
+node "Windows Host" as windows #LightCyan {
+
+  package "Port Proxy (netsh)" as portproxy #White {
+    component "netsh portproxy\n0.0.0.0:80 → WSL2-IP:80\n(bridges Windows ↔ WSL2)" as netsh
+  }
+
+  package "Windows Firewall" as firewall #MistyRose {
+    component "Inbound rule:\nAllow TCP port 80/443" as fwrule
+  }
+
+  node "WSL2 Ubuntu" as wsl #LightBlue {
+
+    node "k3s CLUSTER (1 node)" as k3s #LightSkyBlue {
+
+      package "Built-in Add-ons" as addons #Lavender {
+        component "Klipper / ServiceLB\n(exposes :80 on WSL2 IP)" as klipper
+        component "Traefik\n(Ingress controller)" as traefik
+      }
+
+      package "Namespace: my-app" as ns #White {
+        component "Ingress\n(path rule /)" as ing
+        component "Service\n(ClusterIP)" as svc
+        component "Pod\n(my-service:v1)" as pod1
+        component "Pod\n(my-service:v1)" as pod2
+      }
+    }
+  }
+}
+
+' --- External traffic flow ---
+user -[#red]-> internet        : http://<public-ip>/
+internet -[#red]-> pubip       : reaches router
+pubip -[#red]-> nat            : router receives request
+nat -[#red]-> fwrule           : forwarded to WindowsIP:80
+fwrule -[#red]-> netsh         : firewall allows
+netsh -[#red]-> klipper        : proxied to WSL2-IP:80
+
+' --- Internal k3s flow ---
+klipper -[#orange]-> traefik
+traefik -[#orange]-> ing       : matches Ingress rule
+ing -[#orange]-> svc
+svc -[#green]-> pod1           : load balance
+svc -[#green]-> pod2           : load balance
+
+note right of pubip
+  Check your public IP at:
+  https://whatismyip.com
+  This IP changes when your
+  ISP reassigns it (dynamic IP).
+  Use DDNS to get a stable hostname.
+end note
+
+note right of netsh
+  Run in PowerShell (as Admin):
+  $wslIp = wsl hostname -I
+  netsh interface portproxy add v4tov4 `
+    listenport=80 `
+    listenaddress=0.0.0.0 `
+    connectport=80 `
+    connectaddress=$wslIp
+
+  Must re-run on every reboot
+  because WSL2 IP changes.
+end note
+
+note right of fwrule
+  Run in PowerShell (as Admin):
+  New-NetFirewallRule `
+    -DisplayName "k3s HTTP" `
+    -Direction Inbound `
+    -Protocol TCP `
+    -LocalPort 80 `
+    -Action Allow
+end note
+
+note bottom of wsl
+  WSL2 IP changes on every reboot.
+  Re-run netsh portproxy after
+  each Windows restart.
+end note
+
+note bottom of router
+  Router config varies by brand.
+  Look for: NAT / Virtual Server /
+  Port Forwarding section.
+  Forward external port 80 →
+  your Windows machine's LAN IP.
+  Windows LAN IP (usually stable):
+  run `ipconfig` → find IPv4 address
+  of your main adapter.
+end note
+
+@enduml

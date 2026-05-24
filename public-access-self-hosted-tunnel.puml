@@ -1,0 +1,114 @@
+@startuml Public Access via Self-Hosted Reverse Tunnel
+!theme plain
+title Exposing Local k3s Service Publicly (Self-Hosted Reverse Tunnel)
+
+skinparam componentStyle rectangle
+skinparam backgroundColor #FAFAFA
+
+actor "External User\n(any network)" as user
+cloud "Internet" as internet
+
+node "VPS (Your Own Server)\npublic IP: 1.2.3.4" as vps #LightSalmon {
+
+  package "Tunnel Server Side" as tunnelserver #White {
+    component "frp server (frps)\nOR\nsshd (built-in SSH)" as frps
+    component "Public Port Listener\n:80 / :443" as pubport
+  }
+
+  note right of frps
+    frp option:
+    install frps on VPS,
+    configure to listen
+    for agent connections.
+
+    SSH option:
+    sshd already installed
+    on most VPS by default.
+    No extra install needed.
+  end note
+}
+
+node "Windows Host" as windows #LightCyan {
+
+  node "WSL2 Ubuntu" as wsl #LightBlue {
+
+    package "Tunnel Client Agent\n(runs on your laptop)" as tunnelagent #LightYellow {
+      component "frp client (frpc)\nOR\nssh reverse tunnel" as frpc
+
+      note right of frpc
+        frp option:
+        frpc -c frpc.ini
+
+        SSH option:
+        ssh -R 80:localhost:80 user@1.2.3.4
+        (built-in, no extra install)
+      end note
+    }
+
+    node "k3s CLUSTER (1 node)" as k3s #LightSkyBlue {
+
+      package "Built-in Add-ons" as addons #Lavender {
+        component "Klipper / ServiceLB\n(:80 on localhost)" as klipper
+        component "Traefik\n(Ingress controller)" as traefik
+      }
+
+      package "Namespace: my-app" as ns #White {
+        component "Ingress\n(path rule /)" as ing
+        component "Service\n(ClusterIP)" as svc
+        component "Pod\n(my-service:v1)" as pod1
+        component "Pod\n(my-service:v1)" as pod2
+      }
+    }
+  }
+}
+
+' --- Tunnel setup (outbound from laptop) ---
+frpc -[#blue]-> frps : 1. agent initiates\noutbound connection\nto VPS on startup
+
+' --- External traffic flow ---
+user -[#red]-> internet           : http://1.2.3.4/
+internet -[#red]-> pubport        : hits VPS public IP
+pubport -[#red]-> frps            : VPS receives request
+frps -[#red]-> frpc               : forwarded through\nthe open tunnel
+frpc -[#red]-> klipper            : delivered to localhost:80
+
+' --- Internal k3s flow ---
+klipper -[#orange]-> traefik
+traefik -[#orange]-> ing
+ing -[#orange]-> svc
+svc -[#green]-> pod1              : load balance
+svc -[#green]-> pod2              : load balance
+
+note bottom of vps
+  ** VPS Requirements **
+  - Any cheap VPS works
+    (DigitalOcean, Vultr, AWS EC2 free tier)
+  - Open port 80/443 in VPS firewall
+  - frp server installed (if using frp)
+    OR sshd running (if using SSH tunnel)
+end note
+
+note bottom of wsl
+  ** Laptop Requirements **
+  - No router config needed
+  - No firewall rules needed
+  - No open inbound ports
+  - Just outbound connection to VPS
+  - WSL2 IP changes don't matter
+  - Works behind NAT
+end note
+
+note bottom of internet
+  ** Comparison **
+  +---------------------+----------+-----------+
+  | Feature             | SSH      | frp       |
+  +---------------------+----------+-----------+
+  | Extra install       | None     | frps+frpc |
+  | Stability           | Medium   | High      |
+  | Auto-reconnect      | Manual   | Built-in  |
+  | Multiple ports      | Possible | Easy      |
+  | HTTPS support       | Manual   | Built-in  |
+  +---------------------+----------+-----------+
+end note
+
+@enduml
