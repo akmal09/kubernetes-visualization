@@ -1,0 +1,205 @@
+@startuml k8s Storage PV PVC NFS
+!theme plain
+title Kubernetes Storage: PV, PVC, StorageClass, and NFS (on k3s)
+
+skinparam componentStyle rectangle
+skinparam backgroundColor #FAFAFA
+
+actor "Me\n(Developer)" as me
+
+' ==========================================================
+' NFS SERVER -- external storage provider
+' ==========================================================
+node "NFS Server\n(another machine or VM)\nIP: 192.168.1.50" as nfs_host #Wheat {
+  database "Exported directory\n/srv/nfs/k8s\n(shared filesystem)" as nfs_export
+  component "nfsd\n(NFS daemon)" as nfsd
+}
+
+' ==========================================================
+' MY COMPUTER -- the k3s cluster
+' ==========================================================
+node "My Computer\n(k3s cluster, 1 node)" as host #LightCyan {
+
+  package "k3s CLUSTER" as cluster #LightBlue {
+
+    ' ------- Cluster-scope (no namespace) -------
+    package "Cluster-scope resources\n(no namespace)" as cluster_scope #Lavender {
+
+      component "StorageClass:\nnfs-client\n(provisioner:\nnfs-subdir-\nexternal-provisioner)" as sc
+
+      storage "PV-static\ncapacity: 5Gi\naccessMode: RWX\nnfs:\n  server: 192.168.1.50\n  path: /srv/nfs/k8s/static" as pv_static
+      storage "PV-dynamic-001\n(auto-created by\nprovisioner)\ncapacity: 2Gi\naccessMode: RWX" as pv_dyn
+
+      component "nfs-subdir-\nexternal-provisioner\n(pod, watches PVCs)" as provisioner
+    }
+
+    ' ------- Namespace: my-app -------
+    package "Namespace: my-app" as ns #White {
+
+      component "PVC-A (static)\nrequests: 5Gi\naccessMode: RWX\nvolumeName: PV-static" as pvc_a
+      component "PVC-B (dynamic)\nrequests: 2Gi\naccessMode: RWX\nstorageClassName: nfs-client" as pvc_b
+
+      component "Deployment:\nmy-service" as deploy
+
+      package "Pod replica 1" as pod1 #LightGreen {
+        component "container\nmount: /data" as c1
+        component "Volume\n(PVC-B)" as v1
+      }
+
+      package "Pod replica 2" as pod2 #LightGreen {
+        component "container\nmount: /data" as c2
+        component "Volume\n(PVC-B)" as v2
+      }
+
+      package "Pod (legacy)" as pod3 #LightYellow {
+        component "container\nmount: /shared" as c3
+        component "Volume\n(PVC-A)" as v3
+      }
+    }
+  }
+}
+
+' ==========================================================
+' RELATIONSHIPS
+' ==========================================================
+
+' --- Static provisioning flow ---
+me -[#blue]-> pv_static    : 1a. admin creates PV\n(static, points to NFS path)
+me -[#blue]-> pvc_a        : 2a. user creates PVC\n(binds to PV-static)
+pvc_a -[#blue,dashed]-> pv_static : bound (1:1)
+
+' --- Dynamic provisioning flow ---
+me -[#orange]-> pvc_b      : 1b. user creates PVC\nreferencing StorageClass
+pvc_b ..> sc               : asks StorageClass\nto provision
+sc -[#orange]-> provisioner: triggers
+provisioner -[#orange]-> nfsd : mkdir new subfolder on NFS
+provisioner -[#orange]-> pv_dyn : creates PV dynamically
+pvc_b -[#orange,dashed]-> pv_dyn : bound (auto)
+
+' --- PV -> NFS link ---
+pv_static -[#red]-> nfs_export : nfs mount path:\n/srv/nfs/k8s/static
+pv_dyn    -[#red]-> nfs_export : nfs mount path:\n/srv/nfs/k8s/dyn-001
+
+' --- Pod uses PVC ---
+deploy ..> pod1 : manages
+deploy ..> pod2 : manages
+pod1 --> v1 : volumes:\n - name: data\n   pvc: PVC-B
+pod2 --> v2 : volumes:\n - name: data\n   pvc: PVC-B
+pod3 --> v3 : volumes:\n - name: shared\n   pvc: PVC-A
+
+v1 ..> pvc_b : reference
+v2 ..> pvc_b : reference
+v3 ..> pvc_a : reference
+
+c1 -[#green]-> v1 : mounts at /data
+c2 -[#green]-> v2 : mounts at /data
+c3 -[#green]-> v3 : mounts at /shared
+
+' --- Actual file access at runtime ---
+v1 -[#purple,dashed]-> nfs_export : NFS mount (kernel)
+v2 -[#purple,dashed]-> nfs_export : NFS mount (kernel)
+v3 -[#purple,dashed]-> nfs_export : NFS mount (kernel)
+
+' ==========================================================
+' NOTES
+' ==========================================================
+
+note right of nfs_host
+  NFS is just a file server.
+  It exposes a directory over
+  the network using the NFS
+  protocol. Any client (Linux,
+  K8s pod, etc.) can mount it
+  like a local folder.
+end note
+
+note bottom of sc
+  StorageClass defines:
+  * which provisioner to use
+  * what parameters to pass
+  * default reclaim policy
+
+  In k3s, the default is
+  "local-path" (writes to
+  local disk). Add "nfs-client"
+  via Helm for NFS support:
+  helm install nfs-provisioner \\
+    nfs-subdir-external-provisioner \\
+    --set nfs.server=192.168.1.50 \\
+    --set nfs.path=/srv/nfs/k8s
+end note
+
+note left of provisioner
+  This is a regular pod that
+  watches for PVCs with
+  storageClassName: nfs-client.
+  When it sees one, it creates
+  a subfolder on the NFS share
+  and a matching PV object.
+end note
+
+note bottom of pvc_a
+  STATIC provisioning:
+  Admin pre-creates PV first.
+  PVC then "claims" it by
+  matching size + access mode
+  (or explicit volumeName).
+
+  Use when: NFS share already
+  exists with specific data
+  that pods need to consume.
+end note
+
+note bottom of pvc_b
+  DYNAMIC provisioning:
+  User just creates a PVC
+  referencing a StorageClass.
+  PV is created automatically.
+
+  Use when: pods need their
+  own private storage, no
+  pre-existing data needed.
+end note
+
+note top of ns
+  PVC lives in a NAMESPACE.
+  PV lives at CLUSTER scope.
+  A PVC in namespace "my-app"
+  CANNOT see PVCs in other
+  namespaces, but they all
+  share the PV pool.
+end note
+
+note right of pod1
+  Both pod 1 and pod 2 mount
+  the SAME PVC (PVC-B). They
+  share the same NFS folder.
+
+  This is possible because
+  NFS supports RWX (Read-
+  Write-Many). Block-storage
+  PVs (EBS, local-path) only
+  support RWO -- one pod at
+  a time.
+end note
+
+note bottom of cluster
+  Pod-to-Storage lifecycle:
+
+  1. User writes PVC YAML
+  2. K8s binds PVC -> PV
+     (static or dynamic)
+  3. Pod's volumes[] references
+     PVC by name
+  4. kubelet on the node mounts
+     the PV's backing storage
+     (NFS in this case)
+  5. Container sees it as a
+     regular directory at
+     mountPath (e.g. /data)
+  6. App reads/writes files
+     normally -- they end up
+     on the NFS server.
+end note
+
+@enduml
