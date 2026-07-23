@@ -1,0 +1,74 @@
+# ==========================================================
+# STATIC provisioning: admin creates the PV by hand,
+# pointing directly at an existing NFS export.
+# Flow: PV (admin) -> PVC (user claims it) -> Pod mounts PVC
+# ==========================================================
+apiVersion: v1
+kind: PersistentVolume          # cluster-scoped, NO namespace
+metadata:
+  name: pv-static
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany             # RWX: NFS allows many pods at once
+  persistentVolumeReclaimPolicy: Retain   # keep data when PVC is deleted
+  storageClassName: ""          # "" = no class -> static binding only
+  nfs:
+    server: 192.168.1.50        # your external storage server
+    path: /srv/nfs/k8s/static   # exported directory on that server
+---
+apiVersion: v1
+kind: PersistentVolumeClaim     # lives IN a namespace
+metadata:
+  name: pvc-static
+  namespace: my-app
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: ""
+  volumeName: pv-static         # explicitly bind to the PV above (1:1)
+---
+# ==========================================================
+# DYNAMIC provisioning: user only creates a PVC referencing
+# a StorageClass. The provisioner auto-creates a subfolder
+# on the NFS server AND the matching PV object.
+# Requires nfs-subdir-external-provisioner installed (see note).
+# ==========================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-dynamic
+  namespace: my-app
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: nfs-client  # name of the StorageClass from the provisioner
+---
+# ==========================================================
+# POD consuming the storage. It never knows about NFS —
+# it just references a PVC by name and mounts it as a folder.
+# ==========================================================
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-with-storage
+  namespace: my-app
+spec:
+  containers:
+    - name: app
+      image: busybox
+      command: ["sh", "-c", "echo hello > /data/test.txt && sleep 3600"]
+      volumeMounts:
+        - name: data            # must match a volume name below
+          mountPath: /data      # container sees the NFS share here
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: pvc-dynamic  # swap to pvc-static to use the static PV
