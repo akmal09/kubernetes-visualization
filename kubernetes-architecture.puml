@@ -6,33 +6,37 @@ skinparam componentStyle rectangle
 skinparam backgroundColor #FAFAFA
 
 cloud "Users / Clients" as users
+cloud "Cloud Provider API\n(LB, volumes, nodes)" as cloudapi
 
-package "Control Plane (Master Node)" #LightBlue {
-  component "kube-apiserver" as api
-  component "etcd\n(key-value store)" as etcd
-  component "kube-scheduler" as scheduler
-  component "kube-controller-manager" as ctrl
-  component "cloud-controller-manager" as cloud
-}
+package "Kubernetes Cluster" as cluster #WhiteSmoke {
 
-package "Worker Node 1" #LightYellow {
-  component "kubelet" as kubelet1
-  component "kube-proxy" as proxy1
-  component "Container Runtime\n(containerd / CRI-O)" as cri1
-
-  package "Pods" as pods1 {
-    component "Pod A\n[container]" as podA
-    component "Pod B\n[container(s)]" as podB
+  package "Control Plane (Master Node)" #LightBlue {
+    component "kube-apiserver" as api
+    component "etcd\n(key-value store)" as etcd
+    component "kube-scheduler" as scheduler
+    component "kube-controller-manager" as ctrl
+    component "cloud-controller-manager" as cloud
   }
-}
 
-package "Worker Node 2" #LightYellow {
-  component "kubelet" as kubelet2
-  component "kube-proxy" as proxy2
-  component "Container Runtime" as cri2
+  package "Worker Node 1" #LightYellow {
+    component "kubelet" as kubelet1
+    component "kube-proxy" as proxy1
+    component "Container Runtime\n(containerd / CRI-O)" as cri1
 
-  package "Pods " as pods2 {
-    component "Pod C" as podC
+    package "Pods" as pods1 {
+      component "Pod A\n[container]" as podA
+      component "Pod B\n[container(s)]" as podB
+    }
+  }
+
+  package "Worker Node 2" #LightYellow {
+    component "kubelet" as kubelet2
+    component "kube-proxy" as proxy2
+    component "Container Runtime" as cri2
+
+    package "Pods " as pods2 {
+      component "Pod C" as podC
+    }
   }
 }
 
@@ -41,7 +45,8 @@ users --> api : kubectl / REST (HTTPS)
 api <--> etcd : state read/write
 api --> scheduler : pending pods
 api --> ctrl : desired vs actual state
-api --> cloud : cloud provider API
+api --> cloud : cloud provider events
+cloud --> cloudapi : provision LB / volumes /\nnode metadata
 
 scheduler ..> api : bind pod -> node
 ctrl ..> api : reconcile loops\n(Deployment, ReplicaSet,\nNode, Job, etc.)
@@ -60,6 +65,13 @@ proxy2 -[#green]-> pods2 : network rules
 note right of etcd
   Single source of truth.
   Stores all cluster state.
+end note
+
+note top of cluster
+  A **cluster** = one control plane
+  + all the worker nodes it manages.
+  The API server is the only door in;
+  everything inside talks through it.
 end note
 
 note bottom of pods1
